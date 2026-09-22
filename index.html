@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
+  <title>Reaction / Pulse Instrument</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main id="canvas-container" aria-label="Instrumento audiovisual interactivo"></main>
+
+  <aside class="controls" id="controls" aria-label="Controles audiovisuales">
+    <div class="controls-header">
+      <strong id="panel-title">MODE 1 · REACTION</strong>
+      <button id="panel-toggle" class="icon-button" type="button" aria-label="Minimizar controles" aria-expanded="true">−</button>
+    </div>
+    <div class="controls-body">
+      <button id="audio-toggle" class="audio-button" type="button">START AUDIO</button>
+      <label><span>Shape Size</span><input id="shape-size" type="range" min="0.55" max="2.2" step="0.05" value="1" /></label>
+      <label><span>Influence Radius</span><input id="influence-radius" type="range" min="100" max="520" step="10" value="280" /></label>
+      <label><span>Motion Reactivity</span><input id="motion-reactivity" type="range" min="0" max="2" step="0.05" value="1" /></label>
+      <label><span>Audio Noise</span><input id="audio-noise" type="range" min="0" max="1" step="0.01" value="0.16" /></label>
+      <label><span>Pitch</span><input id="pitch" type="range" min="-12" max="12" step="1" value="0" /></label>
+      <label><span>Trail / Glide</span><input id="trail-persistence" type="range" min="1" max="10" step="0.25" value="5" /><small>Visual memory + pitch glide</small></label>
+      <div class="xy-readout">
+        <span id="mode-axis-x">X: Reverb</span>
+        <span>Y: <b id="note-readout">A2</b></span>
+      </div>
+      <p class="mode-help">Double click / double tap: Change Mode</p>
+    </div>
+  </aside>
+
+  <script src="p5.min.js?v=1.11.11"></script>
+  <script src="audio.js?v=ORBIT1"></script>
+  <script src="mode1.js?v=ORBIT1"></script>
+  <script src="mode2.js?v=ORBIT1"></script>
+  <script src="ui.js?v=ORBIT1"></script>
+  <script src="sketch.js?v=ORBIT1"></script>
+</body>
+</html>

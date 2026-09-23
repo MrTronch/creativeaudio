@@ -37,9 +37,13 @@ function toggleControlPanel() {
 
 function updateAudioButton() {
   const button = document.getElementById("audio-toggle");
+  button.disabled = AudioEngine.initializing;
+  button.setAttribute("aria-busy", String(AudioEngine.initializing));
+  button.setAttribute("aria-live", "polite");
+  button.title = AudioEngine.startError || "";
   const running = AudioEngine.enabled && AudioEngine.context?.state === "running";
   const suspended = AudioEngine.enabled && !running;
-  button.textContent = suspended ? "START AUDIO" : running ? "AUDIO ON" : (AudioEngine.startedOnce ? "AUDIO OFF" : "START AUDIO");
+  button.textContent = AudioEngine.initializing ? "ACTIVANDO…" : AudioEngine.startError ? AudioEngine.startError : suspended ? "START AUDIO" : running ? "AUDIO ON" : (AudioEngine.startedOnce ? "AUDIO OFF" : "START AUDIO");
   button.classList.toggle("is-on", running);
   button.classList.toggle("is-off", AudioEngine.startedOnce && !running);
 }

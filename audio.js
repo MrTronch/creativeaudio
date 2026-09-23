@@ -14,6 +14,9 @@ window.AudioEngine = {
   context: null,
   enabled: false,
   startedOnce: false,
+  initializing: false,
+  graphReady: false,
+  startError: "",
   continuousOscillator: null,
   kickOscillator: null,
   noiseSource: null,
@@ -41,10 +44,9 @@ window.AudioEngine = {
   },
 
   create(context = null) {
-    const Context = window.AudioContext || window.webkitAudioContext;
-    this.context = context || new Context();
-    const c = this.context;
-    if (!context) c.addEventListener("statechange", () => updateAudioButton());
+    if (this.graphReady) return;
+    const c = this.context = context || this.context;
+    try {
 
     this.continuousOscillator = c.createOscillator();
     this.kickOscillator = c.createOscillator();
@@ -71,7 +73,7 @@ window.AudioEngine = {
     this.mixBus = c.createGain();
     this.arpStep = 0; this.nextArpTime = 0; this.arpActive = false;
     this.eyeEffects = new Set(); this.lastEyeDelay = null;
-    if (!context) {
+    if (this === AudioEngine) {
       this.masterCompressor = c.createDynamicsCompressor();
       this.masterCompressor.threshold.value = -5;
       this.masterCompressor.knee.value = 8;
@@ -123,26 +125,77 @@ window.AudioEngine = {
     this.kickOscillator.start();
     this.noiseSource.start();
     this.setReverb(0);
+    this.graphReady = true;
+    } catch (error) {
+      // Dispose only this voice's nodes, never the shared context or compressor.
+      for (const node of Object.values(this)) {
+        if (!node || typeof node.disconnect !== "function") continue;
+        try { if (typeof node.stop === "function") node.stop(); } catch (_) {}
+        try { node.disconnect(); } catch (_) {}
+      }
+      this.graphReady = false;
+      throw error;
+    }
   },
 
   async toggle() {
-    if (!this.context) {
-      this.create();
-      this.startedOnce = true;
-    }
-    if (this.context.state !== "running" || !this.enabled) {
-      await this.context.resume();
-      this.enabled = this.context.state === "running";
-    } else {
+    if (this.initializing) return;
+    if (this.enabled && this.context?.state === "running") {
       this.enabled = false;
       this.silence();
+      updateAudioButton();
+      return;
     }
+    this.initializing = true;
+    this.startError = "";
     updateAudioButton();
+    let timeout, unlock;
+    try {
+      // Optional iOS support: intentional playback can bypass the silent switch.
+      try { if (navigator.audioSession) navigator.audioSession.type = "playback"; } catch (_) {}
+      if (!this.context) {
+        const Context = window.AudioContext || window.webkitAudioContext;
+        if (!Context) throw new Error("Web Audio unavailable");
+        this.context = new Context();
+        this.context.addEventListener("statechange", () => updateAudioButton());
+      }
+      const c = this.context;
+      // Invoke resume and start synchronously in the button's user gesture.
+      // This project uses native Web Audio, not p5.sound/userStartAudio.
+      const resumed = c.state === "running" ? Promise.resolve() : c.resume();
+      const ready = Promise.race([
+        resumed,
+        new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error("Audio start timeout")), 5000); })
+      ]);
+      // Attach a rejection handler even if synchronous graph construction fails.
+      ready.catch(() => {});
+      unlock = c.createBufferSource();
+      unlock.buffer = c.createBuffer(1, 1, c.sampleRate);
+      unlock.connect(c.destination);
+      unlock.start(0);
+      this.create();
+      if (!this.voices) this.voices = [this, createAudioVoice(c)];
+      await ready;
+      if (c.state !== "running") throw new Error("Audio context blocked: " + c.state);
+      this.enabled = true;
+      this.startedOnce = true;
+    } catch (error) {
+      this.enabled = false;
+      if (this.graphReady) this.silence();
+      this.startError = "No se pudo activar el sonido. Pulsa para reintentar.";
+      console.warn("Audio activation failed:", error);
+    } finally {
+      clearTimeout(timeout);
+      if (unlock) {
+        try { unlock.stop(); unlock.disconnect(); } catch (_) {}
+      }
+      this.initializing = false;
+      updateAudioButton();
+    }
   },
 
   update(app) {
-    if (!this.context) return;
-    if (!this.voices) this.voices = [this, createAudioVoice(this.context)];
+    if (!this.graphReady || !this.voices || this.initializing) return;
     const inputs = app.touchInputUsed ? app.touchVoices : [app];
     for (let i = 0; i < this.voices.length; i++) {
       const voice = this.voices[i];
@@ -366,7 +419,7 @@ window.AudioEngine = {
   },
 
   silenceVoice() {
-    if (!this.context) return;
+    if (!this.graphReady) return;
     for (const cleanup of this.eyeEffects) cleanup();
     const now = this.context.currentTime;
     for (const node of [this.continuousGain, this.kickGain, this.noiseMotionGain, this.noiseBurstGain, this.snareGain, this.impactGain, this.effectGain]) {
@@ -390,7 +443,7 @@ window.AudioEngine = {
     this.activeMode = mode;
     this.wasRecent = false;
     this.lastKickTime = millis();
-    if (!this.context) return;
+    if (!this.graphReady) return;
     const now = this.context.currentTime;
     const params = [
       this.impactGain.gain,
@@ -473,7 +526,7 @@ function createAudioVoice(context) {
   const voice = Object.create(AudioEngine);
   Object.assign(voice, { currentMidi: 45, previousMidi: 45, currentNoteIndex: 0,
     lastKickTime: -1000, activeMode: APP.mode, mode2GlideHz: midiHz(MODE2_LOWEST_MIDI),
-    lastUpdateTime: 0, wasRecent: false, voices: null });
+    lastUpdateTime: 0, wasRecent: false, voices: null, graphReady: false });
   voice.create(context);
   return voice;
 }

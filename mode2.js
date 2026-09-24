@@ -295,7 +295,8 @@ function resetMode2PushSquare() {
     lastHit: -1000, hits: 0, voiceIndex: 0 });
   Mode2.bodies = [make("kick", width * 0.35, size, size, 1),
     make("snare", width * 0.65, size * 1.65, size * 0.7, 1.15),
-    { ...make("hat", width * 0.5, size, size, 0.7), y: height * 0.3 }];
+    { ...make("hat", width * 0.32, size, size, 0.7), y: height * 0.28 },
+    { ...make("hat", width * 0.68, size, size, 0.7), y: height * 0.35, angle: Math.PI / 6 }];
   Mode2.pushSquare = Mode2.bodies[0];
   Mode2.pushInputs = new WeakMap();
   Mode2.lastCollision = -1000;

@@ -11,7 +11,7 @@ window.Mode1 = {
   colorY: 0.5,
   signature: "",
   heatStamp: null,
-  pulls: [], nextBlinkAt: 0, greenEye: null, nextGreenAt: 0, blurStart: -1000,
+  heldFuchsia: [], focusClosure: 0, fuchsiaHeld: false, nextBlinkAt: 0, greenEye: null, nextGreenAt: 0, blurStart: -1000,
   nextSpecialAt: 0, specialEyes: [], specialUntil: 0, specialContacts: new Set(),
   init: initMode1,
   enter: enterMode1,
@@ -27,6 +27,7 @@ window.Mode1 = {
 
 function initMode1() {
   Mode1.heatStamp = createMode1HeatStamp();
+  initMode1Chromatic();
   rebuildMode1Points();
 }
 
@@ -37,7 +38,7 @@ function enterMode1() {
   document.getElementById("mode-axis-x").textContent = "X: Reverb";
 }
 
-function exitMode1() { Mode1.pulls=[]; Mode1.blurStart = -1000; const canvas=document.querySelector("#canvas-container canvas"); if(canvas)canvas.style.filter=""; }
+function exitMode1() { Mode1.focusClosure=0;Mode1.fuchsiaHeld=false; Mode1.blurStart = -1000; const canvas=document.querySelector("#canvas-container canvas"); if(canvas)canvas.style.filter=""; }
 
 function updateMode1() {
   ensureMode1Points();
@@ -58,13 +59,19 @@ function updateMode1() {
 
   const now = millis();
   updateMode1SpecialEye(now, highlightInputs);
+  const followLid = 1 - Math.exp(-Math.min(deltaTime, 50) / (Mode1.fuchsiaHeld ? 95 : 145));
+  Mode1.focusClosure = lerp(Mode1.focusClosure, Mode1.fuchsiaHeld ? 1 : 0, followLid);
   if (now >= Mode1.nextBlinkAt && Mode1.points.length) {
     const chosen = Mode1.points[floor(random(Mode1.points.length))];
     chosen.blinkStart = now;
     Mode1.nextBlinkAt = now + random(1700, 3600);
   }
   for (const point of Mode1.points) {
-    point.blinkOpen = 1 - mode1BlinkClosure(now - point.blinkStart);
+    const naturalOpen = 1 - mode1BlinkClosure(now - point.blinkStart);
+    const fuchsia = Mode1.specialEyes.includes(point);
+    const near = !fuchsia && Mode1.heldFuchsia.some(eye => Math.hypot(point.x-eye.x, point.y-eye.y) <= point.cellSize*1.5);
+    point.neighborClosure = lerp(point.neighborClosure || 0, near ? 1 : 0, 1-Math.exp(-Math.min(deltaTime,50)/(near?95:145)));
+    point.blinkOpen = fuchsia ? lerp(naturalOpen, 1, Mode1.focusClosure) : naturalOpen * (1 - point.neighborClosure);
     let nearest = APP.interaction;
     let nearestDistance = Infinity;
     for (const input of paintInputs) {
@@ -92,7 +99,9 @@ function drawMode1() {
   const elapsed=millis()-Mode1.blurStart;
   const blur=elapsed>=0 && elapsed<1100 ? 7*Math.sin(Math.PI*elapsed/1100)**2 : 0;
   const canvas=document.querySelector("#canvas-container canvas");
-  if(canvas)canvas.style.filter=blur>0.01?`blur(${blur.toFixed(2)}px)`:"";
+  const chroma=Mode1.focusClosure*1.6;
+  if(Mode1.chromaRed) { Mode1.chromaRed.setAttribute("dx",chroma.toFixed(2)); Mode1.chromaBlue.setAttribute("dx",(-chroma).toFixed(2)); }
+  if(canvas)canvas.style.filter=(blur>0.01?`blur(${blur.toFixed(2)}px) `:"")+(chroma>0.03?"url(#mode1-chromatic)":"");
   resetMatrix();
   blendMode(BLEND);
   noTint();
@@ -120,7 +129,6 @@ function drawMode1() {
 
     drawMode1Eye(point, point.size);
   }
-  drawMode1Pull();
 }
 function rebuildMode1Points() {
   Mode1.points.length = 0;
@@ -144,7 +152,7 @@ function rebuildMode1Points() {
   }
 
   Mode1.specialEyes = []; Mode1.specialContacts.clear();
-  Mode1.pulls=[];
+  Mode1.focusClosure=0;Mode1.fuchsiaHeld=false;
   Mode1.greenEye=null;Mode1.nextGreenAt=millis()+random(3000,4800);
   Mode1.nextSpecialAt = millis() + random(3000, 5000);
   Mode1.nextBlinkAt = millis() + random(1700, 3600);
@@ -266,18 +274,17 @@ function updateMode1SpecialEye(now, inputs) {
     Mode1.nextSpecialAt = now + random(1050, 1450);
   }
   const touching = new Set();
+  Mode1.fuchsiaHeld = false;
+  Mode1.heldFuchsia.length=0;
   for (const eye of [...Mode1.specialEyes, ...(Mode1.greenEye ? [Mode1.greenEye] : [])]) {
   for (const input of inputs) {
     const key = `${APP.touchInputUsed ? input.identifier : "mouse"}:${Mode1.points.indexOf(eye)}`;
     if (Math.abs(input.x - eye.x) >= eye.cellSize / 2 || Math.abs(input.y - eye.y) >= eye.cellSize / 2) continue;
     touching.add(key);
+    if(Mode1.specialEyes.includes(eye)){Mode1.fuchsiaHeld = true;if(!Mode1.heldFuchsia.includes(eye))Mode1.heldFuchsia.push(eye);}
     if (!Mode1.specialContacts.has(key)) {
       const state = APP.touchInputUsed ? input : APP;
       const voice = audioVoiceForInput(state);
-      if(Mode1.specialEyes.includes(eye)){
-        Mode1.pulls.push({x:input.x/width,y:input.y/height,start:now});
-        if(Mode1.pulls.length>2)Mode1.pulls.shift();
-      }
       const green=eye===Mode1.greenEye;
       if(green)Mode1.blurStart=now;
       if (voice.triggerEyeDelay(state, { x: input.x, y: input.y }, green)) eye.delayFlash = now;
@@ -287,29 +294,18 @@ function updateMode1SpecialEye(now, inputs) {
   Mode1.specialContacts = touching;
 }
 
-// A short scene displacement, independent of the green eye's Gaussian blur.
-function drawMode1Pull() {
-  const now=millis();Mode1.pulls=Mode1.pulls.filter(p=>now-p.start<1600);
-  if(!Mode1.pulls.length)return;
-  let strength=0,x=0,y=0;
-  for(const p of Mode1.pulls){
-    const t=(now-p.start)/1600;
-    const a=t<0.18?smoothStep01(t/0.18):1-smoothStep01((t-0.18)/0.82);
-    strength+=a;x+=p.x*a;y+=p.y*a;
-  }
-  if(strength<0.001)return;
-  x/=strength;y/=strength;strength=Math.min(1.3,strength);
-  const ctx=drawingContext,canvas=ctx.canvas;
-  if(!Mode1.pullBuffer)Mode1.pullBuffer=document.createElement("canvas");
-  const buffer=Mode1.pullBuffer;
-  if(buffer.width!==canvas.width||buffer.height!==canvas.height){buffer.width=canvas.width;buffer.height=canvas.height;}
-  buffer.getContext("2d").drawImage(canvas,0,0);
-  const w=canvas.width,h=canvas.height,zoom=1+strength*0.16;
-  ctx.save();ctx.setTransform(1,0,0,1,0,0);
-  for(let row=0;row<48;row++){
-    const sy=row*h/48,sh=Math.min(h-sy,h/48+1);
-    const shear=Math.sin(row/48*Math.PI*2-y*2)*w*0.018*strength;
-    ctx.drawImage(buffer,0,sy,w,sh,-w*(zoom-1)*x+shear,sy*zoom-h*(zoom-1)*y,w*zoom,sh*zoom+1);
-  }
-  ctx.restore();
+
+function initMode1Chromatic() {
+  if(document.getElementById("mode1-chromatic"))return;
+  const svg=document.createElementNS("http://www.w3.org/2000/svg","svg");
+  svg.setAttribute("width","0");svg.setAttribute("height","0");svg.setAttribute("aria-hidden","true");svg.style.position="absolute";
+  svg.innerHTML=`<defs><filter id="mode1-chromatic" x="-2%" y="-2%" width="104%" height="104%" color-interpolation-filters="sRGB">
+    <feColorMatrix in="SourceGraphic" values="1 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0" result="red"/>
+    <feOffset in="red" dx="0" result="redShift" id="mode1-red-shift"/>
+    <feColorMatrix in="SourceGraphic" values="0 0 0 0 0  0 1 0 0 0  0 0 0 0 0  0 0 0 1 0" result="green"/>
+    <feColorMatrix in="SourceGraphic" values="0 0 0 0 0  0 0 0 0 0  0 0 1 0 0  0 0 0 1 0" result="blue"/>
+    <feOffset in="blue" dx="0" result="blueShift" id="mode1-blue-shift"/>
+    <feBlend in="redShift" in2="green" mode="screen" result="rg"/><feBlend in="rg" in2="blueShift" mode="screen"/>
+  </filter></defs>`;
+  document.body.appendChild(svg);Mode1.chromaRed=document.getElementById("mode1-red-shift");Mode1.chromaBlue=document.getElementById("mode1-blue-shift");
 }

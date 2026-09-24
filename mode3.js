@@ -22,9 +22,10 @@ window.Mode3 = {
   },
   enter() {
     syncShapeSizeLimit();
+    Mode3Background.enter();
     document.getElementById("panel-title").textContent = "MODE 3 · FM OBJECTS";
     document.getElementById("mode-axis-x").textContent = "X: Tremolo + Reverb";
-    for (const input of [APP, ...APP.touchVoices]) { input.fmEnergy = 0; input.fmCollision = 0; }
+    for (const input of [APP, ...APP.touchVoices]) { input.fmEnergy = 0; input.fmCollision = 0; input.fmNextNoteAt = 0; }
   },
   exit() { for (const input of [APP, ...APP.touchVoices]) { input.fmEnergy = 0; input.fmCollision = 0; } },
   update() {
@@ -80,10 +81,13 @@ window.Mode3 = {
         const closing = (a.vx - b.vx) * nx + (a.vy - b.vy) * ny;
         if (closing > 45) {
           const key = i + ":" + j, now = millis();
-          if (now - (this.collisionPairs.get(key) ?? -1000) > 100) {
+          if (now - (this.collisionPairs.get(key) ?? -1000) > MODE3_AUDIO.pairCooldownMs) {
             this.collisionPairs.set(key, now);
             const impact = Math.min(0.4, closing / 1000);
             this.collisionEnergy = Math.min(1, this.collisionEnergy + impact);
+            if(now-(a.lastSoundAt??-1000)>MODE3_AUDIO.objectCooldownMs && now-(b.lastSoundAt??-1000)>MODE3_AUDIO.objectCooldownMs){
+              if(AudioEngine.triggerFMImpact(Math.min(1,closing/600),(a.x+b.x)/2,(a.y+b.y)/2))a.lastSoundAt=b.lastSoundAt=now;
+            }
             for (const input of new Set([a.owner, b.owner])) {
               if (!input || !inputs.includes(input)) continue;
               input.fmCollision = Math.min(1, (input.fmCollision || 0) + impact);

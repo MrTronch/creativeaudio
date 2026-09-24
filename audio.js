@@ -10,6 +10,13 @@ const MODE2_TRIGGER_RATE_MAX = 24;
 const GLIDE_MIN_SECONDS = 0.02;
 const GLIDE_MAX_SECONDS = 0.78;
 
+// Pitch transposition still uses the existing Pitch slider in every mode.
+const MODE2_INTERVALS = [0, 2, 5, 7]; // root, second, fourth, fifth (sus2/sus4)
+const MODE3_INTERVALS = [0, 1, 4, 5, 7, 8, 10]; // Phrygian dominant
+const MODE3_AUDIO = Object.freeze({ root: 45, octaves: 3, maxVoices: 2,
+  attack: 0.006, decay: 0.22, release: 0.045, hitCooldown: 0.045,
+  pairCooldownMs: 160, objectCooldownMs: 100, noise: 0.018 });
+
 window.AudioEngine = {
   context: null,
   enabled: false,
@@ -40,7 +47,11 @@ window.AudioEngine = {
 
   scales: {
     mode1: buildAudioScale(45, 5), // A2-A7
-    mode2: buildAudioScaleRange(MODE2_LOWEST_MIDI, MODE2_HIGHEST_MIDI)
+    mode2: buildIntervalScale(33, 81, 33, MODE2_INTERVALS),
+    mode2Kick: buildIntervalScale(33, 57, 33, MODE2_INTERVALS),
+    mode2Snare: buildIntervalScale(45, 69, 45, MODE2_INTERVALS),
+    mode2Hat: buildIntervalScale(81, 105, 81, MODE2_INTERVALS),
+    mode3: buildIntervalScale(MODE3_AUDIO.root, MODE3_AUDIO.root + MODE3_AUDIO.octaves * 12, MODE3_AUDIO.root, MODE3_INTERVALS)
   },
 
   create(context = null) {
@@ -83,20 +94,14 @@ window.AudioEngine = {
     this.fmGain = c.createGain(); this.fmGain.gain.value = 0;
     this.hatGain = c.createGain(); this.hatGain.gain.value = 0;
     this.fmModulator.connect(this.fmDepth); this.fmDepth.connect(this.fmCarrier.frequency);
-    this.fmTexture = c.createWaveShaper();
-    this.fmTexture.curve = Float32Array.from({ length: 2048 }, (_, i) => Math.round(Math.tanh((i / 2047 * 2 - 1) * 2) * 20) / 20);
-    this.fmTexture.oversample = "2x";
-    this.fmGrain = c.createGain(); this.fmGrain.gain.value = 0.72;
-    this.fmGrainLFO = c.createOscillator(); this.fmGrainDepth = c.createGain();
-    this.fmGrainDepth.gain.value = 0.28; this.fmGrainLFO.frequency.value = 65;
-    this.fmGrainLFO.connect(this.fmGrainDepth); this.fmGrainDepth.connect(this.fmGrain.gain);
     this.fmTremolo = c.createGain();
     this.fmTremoloLFO = c.createOscillator(); this.fmTremoloDepth = c.createGain();
     this.fmTremoloDepth.gain.value = 0; this.fmTremoloLFO.frequency.value = 2;
     this.fmTremoloLFO.connect(this.fmTremoloDepth); this.fmTremoloDepth.connect(this.fmTremolo.gain);
-    this.fmCarrier.connect(this.fmTexture); this.fmTexture.connect(this.fmGrain);
-    this.fmGrain.connect(this.fmTremolo); this.fmTremolo.connect(this.fmGain); this.fmGain.connect(this.mixBus);
-    this.fmGrainLFO.start(); this.fmTremoloLFO.start();
+    this.fmCarrier.connect(this.fmTremolo); this.fmTremolo.connect(this.fmGain); this.fmGain.connect(this.mixBus);
+    this.fmTremoloLFO.start();
+    this.fmLastHit = -Infinity; this.fmEndsAt = 0;
+    if(this === AudioEngine) { this.fmLastDispatch = -Infinity; this.fmTriggerCount = 0; }
     this.hatGain.connect(this.mixBus);
     this.fmCarrier.start(); this.fmModulator.start();
     this.arpStep = 0; this.nextArpTime = 0; this.arpActive = false;
@@ -233,7 +238,7 @@ window.AudioEngine = {
         input.mode = app.mode;
         input.params = app.params;
         voice.updateVoice(input);
-      } else {
+      } else if (app.mode !== 3) {
         voice.wasRecent = false;
         voice.silenceVoice();
       }
@@ -323,39 +328,63 @@ window.AudioEngine = {
   },
 
   updateFM(app) {
-    const now = this.context.currentTime;
-    const recent = app.hasInteracted && (app.inputActive || millis() - app.lastInputTime < 1000);
-    const x = constrain(app.interaction.x / max(width, 1), 0, 1);
+    const notes = this.scales.mode3;
     const y = constrain(1 - app.interaction.y / max(height, 1), 0, 1);
-    const notes = this.scales.mode1;
-    this.currentMidi = notes[round(y * (notes.length - 1))] + app.params.pitch;
-    const hz = midiHz(this.currentMidi);
+    const midi = notes[round(y * (notes.length - 1))] + app.params.pitch;
     const energy = constrain(Math.max(audioGestureEnergy(app), app.fmEnergy || 0), 0, 1);
-    const trail = constrain((app.params.trailPersistence - 1) / 9, 0, 1);
-    const glide = lerp(0.004, 0.022, trail);
-    const depth = Math.pow(x, 1.4) * lerp(0.22, 0.95, trail);
-    this.fmTremolo.gain.setTargetAtTime(1 - depth / 2, now, 0.04);
-    this.fmTremoloDepth.gain.setTargetAtTime(depth / 2, now, 0.04);
-    this.fmTremoloLFO.frequency.setTargetAtTime(lerp(2, 12, x), now, 0.06);
-    this.fmGrainLFO.frequency.setTargetAtTime(lerp(42, 95, energy), now, 0.04);
-    const collision = constrain(app.fmCollision || 0, 0, 1);
-    this.fmNoiseGain.gain.setTargetAtTime(this.enabled && recent ? collision * 0.3 : 0, now, 0.025);
-    const grain = Math.min(0.49, 0.28 + energy * 0.16 + collision * 0.18);
-    this.fmGrain.gain.setTargetAtTime(1 - grain, now, 0.04);
-    this.fmGrainDepth.gain.setTargetAtTime(grain, now, 0.04);
-    const ratio = x < 0.33 ? 1 : x < 0.66 ? 2 : 3;
-    this.fmCarrier.frequency.setTargetAtTime(hz, now, glide);
-    this.fmModulator.frequency.setTargetAtTime(hz * ratio, now, glide);
-    this.fmDepth.gain.setTargetAtTime(hz * (0.35 + energy * 3.5 + collision * 3 + (app.spinEnergy || 0) * 2), now, 0.035);
-    const level = this.enabled && recent ? 0.065 * Math.pow(energy, 0.75) / (1 + hz / 3500) : 0;
-    this.fmGain.gain.setTargetAtTime(level, now, level > this.fmGain.gain.value ? 0.012 : 0.14);
-    this.setReverb(lerp(0.02, 1.25, x));
+    const now = this.context.currentTime;
+    // Movement produces discrete short notes, never a continuously held noise bed.
+    if (this.enabled && app.inputActive && energy > 0.04 && now >= (app.fmNextNoteAt || 0)) {
+      if(AudioEngine.triggerFMImpact(energy, app.interaction.x, app.interaction.y, this))
+        app.fmNextNoteAt = now + lerp(0.24, 0.14, energy);
+    }
+    if(now >= this.fmEndsAt) this.currentMidi = midi;
+  },
+
+  triggerFMImpact(strength, positionX, positionY, preferred = null) {
+    const engine = AudioEngine, c = engine.context;
+    if (!engine.graphReady || !engine.enabled || c.state !== "running" || APP.mode !== 3 || !engine.voices) return false;
+    const now = c.currentTime;
+    if (now - engine.fmLastDispatch < MODE3_AUDIO.hitCooldown) return false;
+    const count = Math.min(MODE3_AUDIO.maxVoices, engine.voices.length);
+    let voice = preferred && engine.voices.indexOf(preferred) < count ? preferred : engine.voices[0];
+    if(!preferred) for(let i=1;i<count;i++)if(engine.voices[i].fmLastHit < voice.fmLastHit)voice=engine.voices[i];
+    // Two fixed oscillator pairs are reused; no source nodes are allocated per hit.
+    engine.fmLastDispatch=now;engine.fmTriggerCount++;
+    voice.fmLastHit=now;
+    const x=constrain(positionX/max(width,1),0,1),y=constrain(1-positionY/max(height,1),0,1);
+    const notes=engine.scales.mode3;
+    const midi=notes[round(y*(notes.length-1))]+APP.params.pitch,hz=midiHz(midi);
+    voice.currentMidi=midi;
+    const level=0.045+constrain(strength,0,1)*0.065;
+    const start=now+0.004,attack=MODE3_AUDIO.attack,decay=MODE3_AUDIO.decay,release=MODE3_AUDIO.release;
+    for(const param of [voice.fmGain.gain,voice.fmNoiseGain.gain]){
+      param.cancelScheduledValues(now);param.setValueAtTime(param.value,now);param.linearRampToValueAtTime(0,start);
+    }
+    const glide=lerp(0.003,0.014,(APP.params.trailPersistence-1)/9);
+    voice.fmCarrier.frequency.cancelScheduledValues(now);voice.fmCarrier.frequency.setTargetAtTime(hz,now,glide);
+    voice.fmModulator.frequency.cancelScheduledValues(now);voice.fmModulator.frequency.setTargetAtTime(hz*(x<.5?1:2),now,glide);
+    voice.fmDepth.gain.cancelScheduledValues(now);
+    voice.fmDepth.gain.setValueAtTime(hz*(0.3+strength*0.8),start);
+    voice.fmDepth.gain.exponentialRampToValueAtTime(hz*0.08,start+decay);
+    voice.fmGain.gain.linearRampToValueAtTime(level,start+attack);
+    voice.fmGain.gain.exponentialRampToValueAtTime(0.0001,start+attack+decay);
+    voice.fmGain.gain.linearRampToValueAtTime(0,start+attack+decay+release);
+    voice.fmNoiseGain.gain.linearRampToValueAtTime(MODE3_AUDIO.noise*APP.params.audioNoise*strength,start+attack);
+    voice.fmNoiseGain.gain.linearRampToValueAtTime(0,start+0.04);
+    const depth=x*lerp(.12,.5,(APP.params.trailPersistence-1)/9);
+    voice.fmTremolo.gain.setTargetAtTime(1-depth/2,now,.025);
+    voice.fmTremoloDepth.gain.setTargetAtTime(depth/2,now,.025);
+    voice.fmTremoloLFO.frequency.setTargetAtTime(lerp(2,12,x),now,.04);
+    voice.setReverb(lerp(.015,.1,x));
+    voice.fmEndsAt=start+attack+decay+release;
+    return true;
   },
 
   triggerHiHat(strength, positionY = height / 2, positionX = width / 2) {
     if (!this.graphReady || !this.enabled || this.context.state !== "running" || APP.mode !== 2) return;
     const c = this.context, now = c.currentTime;
-    const notes = buildAudioScaleRange(81, 105);
+    const notes = this.scales.mode2Hat;
     const note = notes[round(constrain(1 - positionY / max(height, 1), 0, 1) * (notes.length - 1))];
     const x = constrain(positionX / max(width, 1), 0, 1);
     this.lastHatMidi = note;
@@ -413,7 +442,7 @@ window.AudioEngine = {
   triggerImpactKick(strength, positionY = height / 2) {
     if (!this.context || !this.enabled || this.context.state !== "running" || APP.mode !== 2) return;
     const c = this.context, now = c.currentTime;
-    const notes = buildAudioScaleRange(33, 57);
+    const notes = this.scales.mode2Kick;
     const note = notes[Math.round(constrain(1 - positionY / max(height, 1), 0, 1) * (notes.length - 1))];
     this.lastImpactMidi = note;
     const oscillator = c.createOscillator();
@@ -467,7 +496,7 @@ window.AudioEngine = {
       const data = this.snareBuffer.getChannelData(0);
       for (let i = 0; i < data.length; i++) data[i] = (Math.random() * 2 - 1) * 0.65;
     }
-    const notes = buildAudioScaleRange(45, 69);
+    const notes = this.scales.mode2Snare;
     const note = notes[Math.round(constrain(1 - positionY / max(height, 1), 0, 1) * (notes.length - 1))];
     const fundamental = midiHz(note);
     this.lastSnareMidi = note;
@@ -511,6 +540,7 @@ window.AudioEngine = {
     for (const node of [this.continuousGain, this.kickGain, this.noiseMotionGain, this.noiseBurstGain, this.snareGain, this.impactGain, this.effectGain, this.fmGain, this.hatGain]) {
       node.gain.cancelScheduledValues(now);
     }
+    this.fmEndsAt = now;
     this.fmNoiseGain.gain.cancelScheduledValues(now); this.fmNoiseGain.gain.setTargetAtTime(0, now, 0.02);
     this.fmGain.gain.cancelScheduledValues(now); this.fmGain.gain.setTargetAtTime(0, now, 0.02);
     this.hatGain.gain.cancelScheduledValues(now); this.hatGain.gain.setTargetAtTime(0, now, 0.01);
@@ -545,6 +575,7 @@ window.AudioEngine = {
       this.kickOscillator.frequency
     ];
     for (const param of params) param.cancelScheduledValues(now);
+    this.fmEndsAt = now;
     this.fmNoiseGain.gain.cancelScheduledValues(now); this.fmNoiseGain.gain.setTargetAtTime(0, now, 0.02);
     this.fmGain.gain.cancelScheduledValues(now); this.fmGain.gain.setTargetAtTime(0, now, 0.02);
     this.hatGain.gain.cancelScheduledValues(now); this.hatGain.gain.setTargetAtTime(0, now, 0.01);
@@ -559,6 +590,12 @@ window.AudioEngine = {
     this.lastUpdateTime = now;
   }
 };
+
+function buildIntervalScale(lowest, highest, root, intervals) {
+  const notes=[];
+  for(let midi=lowest;midi<=highest;midi++)if(intervals.includes(((midi-root)%12+12)%12))notes.push(midi);
+  return notes;
+}
 
 function buildAudioScale(root, octaves) {
   const notes = [], pentatonic = [0, 3, 5, 7, 10];

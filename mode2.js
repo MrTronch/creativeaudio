@@ -294,7 +294,8 @@ function resetMode2PushSquare() {
     w, h, mass, vx: 0, vy: 0, angle: 0, angularVelocity: 0,
     lastHit: -1000, hits: 0, voiceIndex: 0 });
   Mode2.bodies = [make("kick", width * 0.35, size, size, 1),
-    make("snare", width * 0.65, size * 1.65, size * 0.7, 1.15)];
+    make("snare", width * 0.65, size * 1.65, size * 0.7, 1.15),
+    { ...make("hat", width * 0.5, size, size, 0.7), y: height * 0.3 }];
   Mode2.pushSquare = Mode2.bodies[0];
   Mode2.pushInputs = new WeakMap();
   Mode2.lastCollision = -1000;
@@ -302,18 +303,16 @@ function resetMode2PushSquare() {
 }
 
 function segmentHitsSquare(previous, current, body, padding) {
-  const cosine = Math.cos(body.angle), sine = Math.sin(body.angle);
-  const local = point => ({ x: (point.x - body.x) * cosine + (point.y - body.y) * sine,
-    y: -(point.x - body.x) * sine + (point.y - body.y) * cosine });
-  previous = local(previous); current = local(current);
   let enter = 0, leave = 1;
-  for (const axis of ["x", "y"]) {
-    const half = (axis === "x" ? body.w : body.h) / 2 + padding;
-    const delta = current[axis] - previous[axis];
-    if (Math.abs(delta) < 0.0001) {
-      if (previous[axis] < -half || previous[axis] > half) return false;
-    } else {
-      const a = (-half - previous[axis]) / delta, b = (half - previous[axis]) / delta;
+  const vertices = mode2BodyVertices(body);
+  for (const axis of mode2BodyAxes(body)) {
+    const projection = vertices.map(p => p.x * axis.x + p.y * axis.y);
+    const low = Math.min(...projection) - padding, high = Math.max(...projection) + padding;
+    const start = previous.x * axis.x + previous.y * axis.y;
+    const delta = (current.x - previous.x) * axis.x + (current.y - previous.y) * axis.y;
+    if (Math.abs(delta) < 0.0001) { if (start < low || start > high) return false; }
+    else {
+      const a = (low - start) / delta, b = (high - start) / delta;
       enter = Math.max(enter, Math.min(a, b)); leave = Math.min(leave, Math.max(a, b));
       if (enter > leave) return false;
     }
@@ -326,6 +325,7 @@ function playMode2Body(body, strength) {
   // X controls the reverb of the impact, Y its pentatonic fundamental.
   if (voice.context) voice.setReverb(lerp(0.02, 1.25, constrain(body.x / width, 0, 1)));
   if (body.kind === "kick") voice.triggerImpactKick(strength, body.y);
+  else if (body.kind === "hat") voice.triggerHiHat(strength, body.y, body.x);
   else voice.triggerSnare(strength, body.y);
   body.lastHit = millis(); body.hits++;
 }
@@ -373,24 +373,36 @@ function updateMode2PushSquare(inputs) {
       body.x = constrain(body.x, marginX, width - marginX);
       body.y = constrain(body.y, marginY, height - marginY);
     }
-    resolveMode2BodyCollision(Mode2.bodies[0], Mode2.bodies[1]);
+    for (let i = 0; i < Mode2.bodies.length; i++)
+      for (let j = i + 1; j < Mode2.bodies.length; j++) resolveMode2BodyCollision(Mode2.bodies[i], Mode2.bodies[j]);
   }
 }
 
-function mode2BodyAxes(body) {
-  return [{ x: Math.cos(body.angle), y: Math.sin(body.angle) }, { x: -Math.sin(body.angle), y: Math.cos(body.angle) }];
+function mode2BodyVertices(body) {
+  const local = body.kind === "hat" ? [[0, -body.h / 2], [body.w / 2, body.h / 2], [-body.w / 2, body.h / 2]]
+    : [[-body.w / 2, -body.h / 2], [body.w / 2, -body.h / 2], [body.w / 2, body.h / 2], [-body.w / 2, body.h / 2]];
+  const c = Math.cos(body.angle), s = Math.sin(body.angle);
+  return local.map(([x, y]) => ({ x: body.x + x * c - y * s, y: body.y + x * s + y * c }));
 }
-
+function mode2BodyAxes(body) {
+  const vertices = mode2BodyVertices(body);
+  return vertices.map((p, i) => {
+    const q = vertices[(i + 1) % vertices.length], dx = q.x - p.x, dy = q.y - p.y, length = Math.hypot(dx, dy);
+    return { x: -dy / length, y: dx / length };
+  });
+}
 function resolveMode2BodyCollision(a, b) {
-  const axesA = mode2BodyAxes(a), axesB = mode2BodyAxes(b);
   let overlap = Infinity, normal = null;
-  const dx = b.x - a.x, dy = b.y - a.y;
-  const radius = (body, axes, axis) => Math.abs(axes[0].x * axis.x + axes[0].y * axis.y) * body.w / 2 + Math.abs(axes[1].x * axis.x + axes[1].y * axis.y) * body.h / 2;
-  for (const axis of [...axesA, ...axesB]) {
-    const separation = dx * axis.x + dy * axis.y;
-    const depth = radius(a, axesA, axis) + radius(b, axesB, axis) - Math.abs(separation);
+  const av = mode2BodyVertices(a), bv = mode2BodyVertices(b);
+  for (const axis of [...mode2BodyAxes(a), ...mode2BodyAxes(b)]) {
+    const ap = av.map(p => p.x * axis.x + p.y * axis.y), bp = bv.map(p => p.x * axis.x + p.y * axis.y);
+    const depth = Math.min(Math.max(...ap) - Math.min(...bp), Math.max(...bp) - Math.min(...ap));
     if (depth <= 0) return false;
-    if (depth < overlap) { overlap = depth; const sign = separation < 0 ? -1 : 1; normal = { x: axis.x * sign, y: axis.y * sign }; }
+    if (depth < overlap) {
+      overlap = depth;
+      const sign = (b.x - a.x) * axis.x + (b.y - a.y) * axis.y < 0 ? -1 : 1;
+      normal = { x: axis.x * sign, y: axis.y * sign };
+    }
   }
   const invA = 1 / a.mass, invB = 1 / b.mass, inverseMass = invA + invB;
   a.x -= normal.x * (overlap + 0.1) * invA / inverseMass;
@@ -419,7 +431,9 @@ function drawMode2PushSquare() {
     push(); rectMode(CENTER);
     const hit = constrain(1 - (millis() - body.lastHit) / 220, 0, 1);
     fill(lerp(35, 240, hit)); stroke(255); strokeWeight(mode2LineWeight() * 0.85);
-    translate(body.x, body.y); rotate(body.angle); rect(0, 0, body.w, body.h);
+    translate(body.x, body.y); rotate(body.angle);
+    if (body.kind === "hat") triangle(0, -body.h / 2, body.w / 2, body.h / 2, -body.w / 2, body.h / 2);
+    else rect(0, 0, body.w, body.h);
     pop();
   }
 }

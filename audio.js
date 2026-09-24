@@ -71,6 +71,34 @@ window.AudioEngine = {
     this.shaper.curve = Float32Array.from({ length: 1024 }, (_, i) => Math.tanh((i / 1023 * 2 - 1) * 10) / 3);
     this.shaper.oversample = "2x";
     this.mixBus = c.createGain();
+    // Created with the existing user-gesture graph; each touch has its own FM pair.
+    this.fmNoiseGain = c.createGain(); this.fmNoiseGain.gain.value = 0;
+    this.fmNoiseFilter = c.createBiquadFilter(); this.fmNoiseFilter.type = "bandpass";
+    this.fmNoiseFilter.frequency.value = 3200; this.fmNoiseFilter.Q.value = 0.7;
+    this.noiseSource.connect(this.fmNoiseFilter); this.fmNoiseFilter.connect(this.fmNoiseGain);
+    this.fmNoiseGain.connect(this.mixBus);
+    this.fmCarrier = c.createOscillator();
+    this.fmModulator = c.createOscillator();
+    this.fmDepth = c.createGain();
+    this.fmGain = c.createGain(); this.fmGain.gain.value = 0;
+    this.hatGain = c.createGain(); this.hatGain.gain.value = 0;
+    this.fmModulator.connect(this.fmDepth); this.fmDepth.connect(this.fmCarrier.frequency);
+    this.fmTexture = c.createWaveShaper();
+    this.fmTexture.curve = Float32Array.from({ length: 2048 }, (_, i) => Math.round(Math.tanh((i / 2047 * 2 - 1) * 2) * 20) / 20);
+    this.fmTexture.oversample = "2x";
+    this.fmGrain = c.createGain(); this.fmGrain.gain.value = 0.72;
+    this.fmGrainLFO = c.createOscillator(); this.fmGrainDepth = c.createGain();
+    this.fmGrainDepth.gain.value = 0.28; this.fmGrainLFO.frequency.value = 65;
+    this.fmGrainLFO.connect(this.fmGrainDepth); this.fmGrainDepth.connect(this.fmGrain.gain);
+    this.fmTremolo = c.createGain();
+    this.fmTremoloLFO = c.createOscillator(); this.fmTremoloDepth = c.createGain();
+    this.fmTremoloDepth.gain.value = 0; this.fmTremoloLFO.frequency.value = 2;
+    this.fmTremoloLFO.connect(this.fmTremoloDepth); this.fmTremoloDepth.connect(this.fmTremolo.gain);
+    this.fmCarrier.connect(this.fmTexture); this.fmTexture.connect(this.fmGrain);
+    this.fmGrain.connect(this.fmTremolo); this.fmTremolo.connect(this.fmGain); this.fmGain.connect(this.mixBus);
+    this.fmGrainLFO.start(); this.fmTremoloLFO.start();
+    this.hatGain.connect(this.mixBus);
+    this.fmCarrier.start(); this.fmModulator.start();
     this.arpStep = 0; this.nextArpTime = 0; this.arpActive = false;
     this.eyeEffects = new Set(); this.lastEyeDelay = null;
     if (this === AudioEngine) {
@@ -218,6 +246,7 @@ window.AudioEngine = {
   updateVoice(app) {
     if (!this.context) return;
     if (this.activeMode !== app.mode) this.setVoiceMode(app.mode);
+    if (app.mode === 3) { this.updateFM(app); return; }
     const now = this.context.currentTime;
     const idleTimeout = MODE1_IDLE_TIMEOUT;
     const recent = app.hasInteracted && (app.inputActive || millis() - app.lastInputTime < idleTimeout);
@@ -293,6 +322,63 @@ window.AudioEngine = {
     }
   },
 
+  updateFM(app) {
+    const now = this.context.currentTime;
+    const recent = app.hasInteracted && (app.inputActive || millis() - app.lastInputTime < 1000);
+    const x = constrain(app.interaction.x / max(width, 1), 0, 1);
+    const y = constrain(1 - app.interaction.y / max(height, 1), 0, 1);
+    const notes = this.scales.mode1;
+    this.currentMidi = notes[round(y * (notes.length - 1))] + app.params.pitch;
+    const hz = midiHz(this.currentMidi);
+    const energy = constrain(Math.max(audioGestureEnergy(app), app.fmEnergy || 0), 0, 1);
+    const trail = constrain((app.params.trailPersistence - 1) / 9, 0, 1);
+    const glide = lerp(0.004, 0.022, trail);
+    const depth = Math.pow(x, 1.4) * lerp(0.22, 0.95, trail);
+    this.fmTremolo.gain.setTargetAtTime(1 - depth / 2, now, 0.04);
+    this.fmTremoloDepth.gain.setTargetAtTime(depth / 2, now, 0.04);
+    this.fmTremoloLFO.frequency.setTargetAtTime(lerp(2, 12, x), now, 0.06);
+    this.fmGrainLFO.frequency.setTargetAtTime(lerp(42, 95, energy), now, 0.04);
+    const collision = constrain(app.fmCollision || 0, 0, 1);
+    this.fmNoiseGain.gain.setTargetAtTime(this.enabled && recent ? collision * 0.3 : 0, now, 0.025);
+    const grain = Math.min(0.49, 0.28 + energy * 0.16 + collision * 0.18);
+    this.fmGrain.gain.setTargetAtTime(1 - grain, now, 0.04);
+    this.fmGrainDepth.gain.setTargetAtTime(grain, now, 0.04);
+    const ratio = x < 0.33 ? 1 : x < 0.66 ? 2 : 3;
+    this.fmCarrier.frequency.setTargetAtTime(hz, now, glide);
+    this.fmModulator.frequency.setTargetAtTime(hz * ratio, now, glide);
+    this.fmDepth.gain.setTargetAtTime(hz * (0.35 + energy * 3.5 + collision * 3 + (app.spinEnergy || 0) * 2), now, 0.035);
+    const level = this.enabled && recent ? 0.065 * Math.pow(energy, 0.75) / (1 + hz / 3500) : 0;
+    this.fmGain.gain.setTargetAtTime(level, now, level > this.fmGain.gain.value ? 0.012 : 0.14);
+    this.setReverb(lerp(0.02, 1.25, x));
+  },
+
+  triggerHiHat(strength, positionY = height / 2, positionX = width / 2) {
+    if (!this.graphReady || !this.enabled || this.context.state !== "running" || APP.mode !== 2) return;
+    const c = this.context, now = c.currentTime;
+    const notes = buildAudioScaleRange(81, 105);
+    const note = notes[round(constrain(1 - positionY / max(height, 1), 0, 1) * (notes.length - 1))];
+    const x = constrain(positionX / max(width, 1), 0, 1);
+    this.lastHatMidi = note;
+    if (!this.hatBuffer) {
+      this.hatBuffer = c.createBuffer(1, Math.ceil(c.sampleRate * 0.3), c.sampleRate);
+      const data = this.hatBuffer.getChannelData(0);
+      for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+    }
+    const source = c.createBufferSource(), highpass = c.createBiquadFilter(), envelope = c.createGain();
+    source.buffer = this.hatBuffer; source.loop = true;
+    source.playbackRate.value = midiHz(note) / midiHz(81);
+    highpass.type = "highpass"; highpass.frequency.value = Math.min(c.sampleRate * 0.4, Math.min(14000, midiHz(note) * 5));
+    highpass.Q.value = 0.7;
+    const decay = lerp(0.055, 0.19, x);
+    envelope.gain.setValueAtTime(0, now);
+    envelope.gain.linearRampToValueAtTime(0.12 + constrain(strength, 0, 1) * 0.22, now + 0.002);
+    envelope.gain.exponentialRampToValueAtTime(0.0001, now + decay);
+    this.hatGain.gain.cancelScheduledValues(now); this.hatGain.gain.setValueAtTime(1, now);
+    source.connect(highpass); highpass.connect(envelope); envelope.connect(this.hatGain);
+    source.start(now); source.stop(now + decay + 0.02);
+    source.onended = () => { source.disconnect(); highpass.disconnect(); envelope.disconnect(); };
+  },
+
   triggerNoiseBurst() {
     if (!this.context || !this.enabled || this.activeMode !== 2 || APP.mode !== 2 || APP.params.audioNoise <= 0) return;
     const now = this.context.currentTime;
@@ -343,7 +429,7 @@ window.AudioEngine = {
     oscillator.onended = () => oscillator.disconnect();
   },
 
-  triggerEyeDelay(input, position) {
+  triggerEyeDelay(input, position, green = false) {
     if (!this.context || !this.enabled || this.context.state !== "running" || APP.mode !== 1) return false;
     const c = this.context, now = c.currentTime;
     if (this.lastEyeDelay && now - this.lastEyeDelay.at < 0.18) return false;
@@ -351,17 +437,17 @@ window.AudioEngine = {
     const x = constrain(position.x / max(width, 1), 0, 1);
     const y = constrain(1 - position.y / max(height, 1), 0, 1);
     const note = this.scales.mode1[Math.round(y * (this.scales.mode1.length - 1))] + APP.params.pitch;
-    const delayTime = lerp(0.12, 0.48, x), feedbackAmount = lerp(0.22, 0.58, x);
+    const delayTime = green ? lerp(0.055, 0.13, x) : lerp(0.12, 0.48, x), feedbackAmount = green ? 0.82 : lerp(0.22, 0.58, x);
     const oscillator = c.createOscillator(), envelope = c.createGain();
     const delay = c.createDelay(1), feedback = c.createGain(), echoes = c.createGain();
     oscillator.type = "triangle"; oscillator.frequency.value = midiHz(note);
     envelope.gain.setValueAtTime(0, now); envelope.gain.linearRampToValueAtTime(0.065, now + 0.008);
     envelope.gain.exponentialRampToValueAtTime(0.0001, now + 0.16); envelope.gain.setValueAtTime(0, now + 0.18);
-    delay.delayTime.value = delayTime; feedback.gain.value = feedbackAmount; echoes.gain.value = 0.85;
+    delay.delayTime.value = delayTime; feedback.gain.value = feedbackAmount; echoes.gain.value = green ? 1.05 : 0.85;
     oscillator.connect(envelope); envelope.connect(this.effectGain); envelope.connect(delay);
     delay.connect(feedback); feedback.connect(delay); delay.connect(echoes); echoes.connect(this.effectGain);
     this.lastEyeDelay = { note, delayTime, feedback: feedbackAmount, at: now };
-    oscillator.start(now); oscillator.stop(now + delayTime * 12 + 0.3);
+    oscillator.start(now); oscillator.stop(now + delayTime * (green ? 40 : 12) + 0.3);
     const cleanup = () => {
       oscillator.onended = null;
       try { oscillator.stop(); } catch (_) { /* already stopped */ }
@@ -422,9 +508,12 @@ window.AudioEngine = {
     if (!this.graphReady) return;
     for (const cleanup of this.eyeEffects) cleanup();
     const now = this.context.currentTime;
-    for (const node of [this.continuousGain, this.kickGain, this.noiseMotionGain, this.noiseBurstGain, this.snareGain, this.impactGain, this.effectGain]) {
+    for (const node of [this.continuousGain, this.kickGain, this.noiseMotionGain, this.noiseBurstGain, this.snareGain, this.impactGain, this.effectGain, this.fmGain, this.hatGain]) {
       node.gain.cancelScheduledValues(now);
     }
+    this.fmNoiseGain.gain.cancelScheduledValues(now); this.fmNoiseGain.gain.setTargetAtTime(0, now, 0.02);
+    this.fmGain.gain.cancelScheduledValues(now); this.fmGain.gain.setTargetAtTime(0, now, 0.02);
+    this.hatGain.gain.cancelScheduledValues(now); this.hatGain.gain.setTargetAtTime(0, now, 0.01);
     this.impactGain.gain.setTargetAtTime(0, now, 0.03);
     this.effectGain.gain.setTargetAtTime(0, now, 0.03);
     this.snareGain.gain.setTargetAtTime(0, now, 0.03);
@@ -456,6 +545,9 @@ window.AudioEngine = {
       this.kickOscillator.frequency
     ];
     for (const param of params) param.cancelScheduledValues(now);
+    this.fmNoiseGain.gain.cancelScheduledValues(now); this.fmNoiseGain.gain.setTargetAtTime(0, now, 0.02);
+    this.fmGain.gain.cancelScheduledValues(now); this.fmGain.gain.setTargetAtTime(0, now, 0.02);
+    this.hatGain.gain.cancelScheduledValues(now); this.hatGain.gain.setTargetAtTime(0, now, 0.01);
     this.impactGain.gain.setTargetAtTime(0, now, 0.025);
     this.effectGain.gain.setTargetAtTime(0, now, 0.025);
     this.arpActive = false;

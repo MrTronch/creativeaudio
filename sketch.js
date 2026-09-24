@@ -67,6 +67,7 @@ function setup() {
   APP.touchVoices = [createTouchVoice(), createTouchVoice()];
   Mode1.init();
   Mode2.init();
+  Mode3.init();
   UI.init();
   Mode1.enter();
   strokeCap(ROUND);
@@ -77,17 +78,8 @@ function draw() {
   updateGlobalInput();
   updateCenterPaletteSwap();
 
-  if (APP.mode === 1) {
-    runModeSafely("MODE 1", () => {
-      Mode1.update();
-      Mode1.draw();
-    });
-  } else {
-    runModeSafely("MODE 2", () => {
-      Mode2.update();
-      Mode2.draw();
-    });
-  }
+  const mode = [null, Mode1, Mode2, Mode3][APP.mode];
+  runModeSafely(`MODE ${APP.mode}`, () => { mode.update(); mode.draw(); });
 
   // Audio errors never stop visual rendering.
   try {
@@ -249,17 +241,11 @@ function handleDoubleGesture(event) {
 function changeMode() {
   APP.transitionSnapshot = get();
   APP.transitionStart = millis();
-  if (APP.mode === 1) {
-    Mode1.exit();
-    APP.mode = 2;
-    AudioEngine.setActiveMode(2);
-    Mode2.enter();
-  } else {
-    Mode2.exit();
-    APP.mode = 1;
-    AudioEngine.setActiveMode(1);
-    Mode1.enter();
-  }
+  const modes = [null, Mode1, Mode2, Mode3];
+  modes[APP.mode].exit();
+  APP.mode = APP.mode % 3 + 1;
+  AudioEngine.setActiveMode(APP.mode);
+  modes[APP.mode].enter();
   APP.modeMessageUntil = millis() + 1050;
 }
 
@@ -282,7 +268,7 @@ function drawModeLabel() {
   textAlign(CENTER, CENTER);
   textStyle(BOLD);
   textSize(min(width, height) * 0.023);
-  text(APP.mode === 1 ? "MODE 1 — ISO HEAT" : "MODE 2 — PULSE", width / 2, height * 0.12);
+  text(["", "MODE 1 — ISO HEAT", "MODE 2 — PULSE", "MODE 3 — FM OBJECTS"][APP.mode], width / 2, height * 0.12);
 }
 
 function smoothStep01(value) {
@@ -297,6 +283,7 @@ function windowResized() {
   APP.previousInput.set(APP.interaction);
   Mode1.resize();
   Mode2.init();
+  Mode3.init();
 }
 
 function createTouchVoice() {
@@ -326,7 +313,7 @@ function cancelDoubleTap() {
 }
 
 function touchStarted(event) {
-  if (!event) return true;
+  if (!event || !event.touches || !event.changedTouches) return true;
   if (event.touches.length > 1) {
     APP.multiTouchGesture = true;
     cancelDoubleTap();
@@ -356,7 +343,7 @@ function touchStarted(event) {
 }
 
 function touchMoved(event) {
-  if (!event) return true;
+  if (!event || !event.touches || !event.changedTouches) return true;
   for (const touch of event.changedTouches) {
     const voice = APP.touchAssignments.get(touch.identifier);
     if (voice) {
@@ -370,7 +357,7 @@ function touchMoved(event) {
 }
 
 function touchEnded(event) {
-  if (!event) return true;
+  if (!event || !event.touches || !event.changedTouches) return true;
   for (const touch of event.changedTouches) {
     const voice = APP.touchAssignments.get(touch.identifier);
     if (voice) {

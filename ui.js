@@ -30,7 +30,7 @@ function toggleControlPanel() {
   const panel = document.getElementById("controls");
   const button = document.getElementById("panel-toggle");
   const collapsed = panel.classList.toggle("collapsed");
-  button.textContent = collapsed ? "+" : "−";
+  button.textContent = collapsed ? "+" : "âˆ’";
   button.setAttribute("aria-expanded", String(!collapsed));
   button.setAttribute("aria-label", collapsed ? "Abrir controles" : "Minimizar controles");
 }
@@ -43,7 +43,7 @@ function updateAudioButton() {
   button.title = AudioEngine.startError || "";
   const running = AudioEngine.enabled && AudioEngine.context?.state === "running";
   const suspended = AudioEngine.enabled && !running;
-  button.textContent = AudioEngine.initializing ? "ACTIVANDO�" : AudioEngine.startError ? AudioEngine.startError : suspended ? "START AUDIO" : running ? "AUDIO ON" : (AudioEngine.startedOnce ? "AUDIO OFF" : "START AUDIO");
+  button.textContent = AudioEngine.initializing ? "ACTIVANDO..." : AudioEngine.startError ? AudioEngine.startError : suspended ? "START AUDIO" : running ? "AUDIO ON" : (AudioEngine.startedOnce ? "AUDIO OFF" : "START AUDIO");
   button.classList.toggle("is-on", running);
   button.classList.toggle("is-off", AudioEngine.startedOnce && !running);
 }

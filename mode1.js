@@ -11,8 +11,8 @@ window.Mode1 = {
   colorY: 0.5,
   signature: "",
   heatStamp: null,
-  nextBlinkAt: 0,
-  nextSpecialAt: 0, specialEye: null, specialUntil: 0, specialContacts: new Set(),
+  pulls: [], nextBlinkAt: 0, greenEye: null, nextGreenAt: 0, blurStart: -1000,
+  nextSpecialAt: 0, specialEyes: [], specialUntil: 0, specialContacts: new Set(),
   init: initMode1,
   enter: enterMode1,
   update: updateMode1,
@@ -37,7 +37,7 @@ function enterMode1() {
   document.getElementById("mode-axis-x").textContent = "X: Reverb";
 }
 
-function exitMode1() {}
+function exitMode1() { Mode1.pulls=[]; Mode1.blurStart = -1000; const canvas=document.querySelector("#canvas-container canvas"); if(canvas)canvas.style.filter=""; }
 
 function updateMode1() {
   ensureMode1Points();
@@ -89,6 +89,10 @@ function updateMode1() {
 }
 
 function drawMode1() {
+  const elapsed=millis()-Mode1.blurStart;
+  const blur=elapsed>=0 && elapsed<1100 ? 7*Math.sin(Math.PI*elapsed/1100)**2 : 0;
+  const canvas=document.querySelector("#canvas-container canvas");
+  if(canvas)canvas.style.filter=blur>0.01?`blur(${blur.toFixed(2)}px)`:"";
   resetMatrix();
   blendMode(BLEND);
   noTint();
@@ -116,6 +120,7 @@ function drawMode1() {
 
     drawMode1Eye(point, point.size);
   }
+  drawMode1Pull();
 }
 function rebuildMode1Points() {
   Mode1.points.length = 0;
@@ -138,7 +143,9 @@ function rebuildMode1Points() {
     }
   }
 
-  Mode1.specialEye = null; Mode1.specialContacts.clear();
+  Mode1.specialEyes = []; Mode1.specialContacts.clear();
+  Mode1.pulls=[];
+  Mode1.greenEye=null;Mode1.nextGreenAt=millis()+random(3000,4800);
   Mode1.nextSpecialAt = millis() + random(3000, 5000);
   Mode1.nextBlinkAt = millis() + random(1700, 3600);
   Mode1.signature = mode1Signature();
@@ -202,7 +209,7 @@ function drawMode1Eye(point, size) {
   context.bezierCurveTo(-size * 0.22, upperArch, size * 0.22, upperArch, half, 0);
   context.bezierCurveTo(size * 0.22, arch, -size * 0.22, arch, -half, 0);
   context.closePath();
-  context.fillStyle = point === Mode1.specialEye && millis() < Mode1.specialUntil ? "#ff008e" : point.highlighted ? "#ffdc35" : "#ffffff";
+  context.fillStyle = point === Mode1.greenEye ? "#39ff14" : Mode1.specialEyes.includes(point) && millis() < point.specialUntil ? "#ff008e" : point.highlighted ? "#ffdc35" : "#ffffff";
   context.fill();
   context.strokeStyle = "#080b0c";
   context.lineWidth = size * 0.045;
@@ -240,24 +247,69 @@ function mode1BlinkClosure(elapsed) {
 }
 
 function updateMode1SpecialEye(now, inputs) {
-  if (now >= Mode1.nextSpecialAt && Mode1.points.length) {
-    const candidates = Mode1.points.filter(point => !pointIsOverUI(point.x, point.y));
-    Mode1.specialEye = candidates.length ? candidates[floor(random(candidates.length))] : null;
-    Mode1.specialUntil = now + 2300;
-    Mode1.nextSpecialAt = now + random(3000, 5000);
-    Mode1.specialContacts.clear();
+  Mode1.specialEyes = Mode1.specialEyes.filter(eye => now < eye.specialUntil);
+  if(Mode1.greenEye && now>=Mode1.greenEye.specialUntil)Mode1.greenEye=null;
+  if(now>=Mode1.nextGreenAt){
+    const candidates=Mode1.points.filter(p=>!Mode1.specialEyes.includes(p)&&!pointIsOverUI(p.x,p.y));
+    if(candidates.length){Mode1.greenEye=candidates[floor(random(candidates.length))];Mode1.greenEye.specialUntil=now+3200;}
+    Mode1.nextGreenAt=now+random(3000,4800);
   }
-  if (!Mode1.specialEye || now >= Mode1.specialUntil) { Mode1.specialEye = null; Mode1.specialContacts.clear(); return; }
-  const eye = Mode1.specialEye, touching = new Set();
+  if (now >= Mode1.nextSpecialAt && Mode1.points.length) {
+    const candidates = Mode1.points.filter(point => point !== Mode1.greenEye && !Mode1.specialEyes.includes(point) && !pointIsOverUI(point.x, point.y));
+    const otherRows = candidates.filter(point => !Mode1.specialEyes.some(eye => eye.y === point.y));
+    const pool = otherRows.length ? otherRows : candidates;
+    if (pool.length && Mode1.specialEyes.length < 3) {
+      const eye = pool[floor(random(pool.length))];
+      eye.specialUntil = now + random(2700, 3500);
+      Mode1.specialEyes.push(eye);
+    }
+    Mode1.nextSpecialAt = now + random(1050, 1450);
+  }
+  const touching = new Set();
+  for (const eye of [...Mode1.specialEyes, ...(Mode1.greenEye ? [Mode1.greenEye] : [])]) {
   for (const input of inputs) {
-    const key = APP.touchInputUsed ? input.identifier : "mouse";
+    const key = `${APP.touchInputUsed ? input.identifier : "mouse"}:${Mode1.points.indexOf(eye)}`;
     if (Math.abs(input.x - eye.x) >= eye.cellSize / 2 || Math.abs(input.y - eye.y) >= eye.cellSize / 2) continue;
     touching.add(key);
     if (!Mode1.specialContacts.has(key)) {
       const state = APP.touchInputUsed ? input : APP;
       const voice = audioVoiceForInput(state);
-      if (voice.triggerEyeDelay(state, { x: input.x, y: input.y })) eye.delayFlash = now;
+      if(Mode1.specialEyes.includes(eye)){
+        Mode1.pulls.push({x:input.x/width,y:input.y/height,start:now});
+        if(Mode1.pulls.length>2)Mode1.pulls.shift();
+      }
+      const green=eye===Mode1.greenEye;
+      if(green)Mode1.blurStart=now;
+      if (voice.triggerEyeDelay(state, { x: input.x, y: input.y }, green)) eye.delayFlash = now;
     }
   }
+  }
   Mode1.specialContacts = touching;
+}
+
+// A short scene displacement, independent of the green eye's Gaussian blur.
+function drawMode1Pull() {
+  const now=millis();Mode1.pulls=Mode1.pulls.filter(p=>now-p.start<1600);
+  if(!Mode1.pulls.length)return;
+  let strength=0,x=0,y=0;
+  for(const p of Mode1.pulls){
+    const t=(now-p.start)/1600;
+    const a=t<0.18?smoothStep01(t/0.18):1-smoothStep01((t-0.18)/0.82);
+    strength+=a;x+=p.x*a;y+=p.y*a;
+  }
+  if(strength<0.001)return;
+  x/=strength;y/=strength;strength=Math.min(1.3,strength);
+  const ctx=drawingContext,canvas=ctx.canvas;
+  if(!Mode1.pullBuffer)Mode1.pullBuffer=document.createElement("canvas");
+  const buffer=Mode1.pullBuffer;
+  if(buffer.width!==canvas.width||buffer.height!==canvas.height){buffer.width=canvas.width;buffer.height=canvas.height;}
+  buffer.getContext("2d").drawImage(canvas,0,0);
+  const w=canvas.width,h=canvas.height,zoom=1+strength*0.16;
+  ctx.save();ctx.setTransform(1,0,0,1,0,0);
+  for(let row=0;row<48;row++){
+    const sy=row*h/48,sh=Math.min(h-sy,h/48+1);
+    const shear=Math.sin(row/48*Math.PI*2-y*2)*w*0.018*strength;
+    ctx.drawImage(buffer,0,sy,w,sh,-w*(zoom-1)*x+shear,sy*zoom-h*(zoom-1)*y,w*zoom,sh*zoom+1);
+  }
+  ctx.restore();
 }
